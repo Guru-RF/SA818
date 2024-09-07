@@ -11,6 +11,7 @@ __doc__ = """sa818"""
 import argparse
 import logging
 import os
+import re
 import sys
 import textwrap
 import time
@@ -44,6 +45,7 @@ DCS_CODES = [
 BAUD_RATES = [300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200]
 
 DEFAULT_BAUDRATE = 9600
+
 
 class SA818:
   EOL = "\r\n"
@@ -80,7 +82,7 @@ class SA818:
     self.send(self.INIT)
     reply = self.readline()
     if reply != "+DMOCONNECT:0":
-      raise SystemError('Connection error')
+      raise SystemError('Connection error') from None
 
   def close(self):
     self.serial.close()
@@ -112,11 +114,12 @@ class SA818:
     time.sleep(0.5)
     reply = self.readline()
     try:
-      _, version = reply.split('_')
+      version = re.split(r'[:_]', reply)
     except ValueError:
-      logger.error('Unable to decode the firmeare version')
-    else:
-      logger.info('Firmware version: %s', version)
+      logger.error('Unable to decode the firmware version')
+      return None
+
+    logger.info('Firmware %s, version: %s', version[1], '_'.join(version[2:]))
     return version
 
   def set_radio(self, opts):
@@ -127,13 +130,12 @@ class SA818:
       tx_tone, rx_tone = ['0000', '0000']
 
     if opts.offset == 0.0:
-      tx_freq = rx_freq = "{:.4f}".format(opts.frequency)
+      tx_freq = rx_freq = f"{opts.frequency:.4f}"
     else:
-      rx_freq = "{:.4f}".format(opts.frequency)
-      tx_freq = "{:.4f}".format(opts.frequency + opts.offset)
+      rx_freq = f"{opts.frequency:.4f}"
+      tx_freq = f"{opts.frequency + opts.offset:.4f}"
 
-    cmd = "{}={},{},{},{},{},{}".format(self.SETGRP, opts.bw, tx_freq, rx_freq,
-                                        tx_tone, opts.squelch, rx_tone)
+    cmd = f"{self.SETGRP}={opts.bw},{tx_freq},{rx_freq},{tx_tone},{opts.squelch},{rx_tone}"
     self.send(cmd)
     time.sleep(1)
     response = self.readline()
@@ -153,16 +155,18 @@ class SA818:
         msg = "%s, BW: %s, RX frequency: %s, TX frequency: %s, squelch: %s, OK"
         logger.info(msg, response, bw_label, rx_freq, tx_freq, opts.squelch)
 
-    if opts.close_tail is not None and opts.ctcss is not None:
-      self.close_tail(opts)
-    elif opts.close_tail is not None:
-      logger.warning('Ignoring "--close-tail" specified without ctcss')
+    if opts.tail is not None and opts.ctcss is not None:
+      self.tail(opts)
+    elif opts.tail is not None:
+      logger.warning('Ignoring "--tail" specified without ctcss')
 
   def set_filter(self, opts):
-    _yn = {True: "Yes", False: "No"}
+    for key in ("emphasis", "highpass", "lowpass"):
+      if getattr(opts, key) is None:
+        setattr(opts, key, 1)
+    _rx = {0: 'enabled', 1: 'disabled'}
     # filters are pre-emphasis, high-pass, low-pass
-    cmd = "{}={},{},{}".format(self.FILTER, int(not opts.emphasis),
-                               int(opts.highpass), int(opts.lowpass))
+    cmd = f"{self.FILTER}={opts.emphasis},{opts.highpass},{opts.lowpass}"
     self.send(cmd)
     time.sleep(1)
     response = self.readline()
@@ -170,10 +174,10 @@ class SA818:
       logger.error('SA818 set filter error')
     else:
       logger.info("%s filters [Pre/De]emphasis: %s, high-pass: %s, low-pass: %s",
-                  response, _yn[opts.emphasis], _yn[opts.highpass], _yn[opts.lowpass])
+                  response, _rx[opts.emphasis], _rx[opts.highpass], _rx[opts.lowpass])
 
   def set_volume(self, opts):
-    cmd = "{}={:d}".format(self.VOLUME, opts.level)
+    cmd = f"{self.VOLUME}={opts.level:d}"
     self.send(cmd)
     time.sleep(1)
     response = self.readline()
@@ -182,28 +186,29 @@ class SA818:
     else:
       logger.info("%s Volume level: %d, OK", response, opts.level)
 
-  def close_tail(self, opts):
-    _yn = {True: "Yes", False: "No"}
-    cmd = "{}={}".format(self.TAIL, int(opts.close_tail))
+  def tail(self, opts):
+    _oc = {True: "open", False: "close"}
+    cmd = f"{self.TAIL}={int(opts.tail)}"
     self.send(cmd)
     time.sleep(1)
     response = self.readline()
     if response != "+DMOSETTAIL:0":
       logger.error('SA818 set filter error')
     else:
-      logger.info("%s close tail: %s", response, _yn[opts.close_tail])
+      logger.info("%s tail: %s", response, _oc[opts.tail])
 
 
 def type_frequency(parg):
   try:
     frequency = float(parg)
   except ValueError:
-    raise argparse.ArgumentTypeError from None
+    raise argparse.ArgumentError from None
 
   if not 144 < frequency < 148 and not 420 < frequency < 450:
     logger.error('Frequency outside the amateur bands')
     raise argparse.ArgumentError
   return frequency
+
 
 def type_ctcss(parg):
   err_msg = 'Invalid CTCSS use the --help argument for the list of CTCSS'
@@ -228,6 +233,7 @@ def type_ctcss(parg):
 
   return tone_codes
 
+
 def type_dcs(parg):
   err_msg = 'Invalid DCS use the --help argument for the list of DCS'
   dcs_codes = []
@@ -245,7 +251,7 @@ def type_dcs(parg):
 
     code, direction = code[:-1], code[-1]
     try:
-      dcs = "{:03d}".format(int(code))
+      dcs = f"{int(code):03d}"
       if dcs not in DCS_CODES:
         logger.error(err_msg)
         raise argparse.ArgumentError
@@ -254,6 +260,7 @@ def type_dcs(parg):
     dcs_codes.append(dcs + direction)
 
   return dcs_codes
+
 
 def type_squelch(parg):
   try:
@@ -266,6 +273,7 @@ def type_squelch(parg):
     raise argparse.ArgumentError
   return value
 
+
 def type_level(parg):
   try:
     value = int(parg)
@@ -277,19 +285,24 @@ def type_level(parg):
     raise argparse.ArgumentError
   return value
 
-def yesno(parg):
-  yes_strings = ["y", "yes", "true", "1", "on"]
-  no_strings = ["n", "no", "false", "0", "off"]
-  if parg.lower() in yes_strings:
-    return True
-  if parg.lower() in no_strings:
-    return False
-  raise argparse.ArgumentError
 
-def noneyesno(parg):
-  if parg is not None:
-    return yesno(parg)
-  return None
+def enabledisable(parg):
+  if parg.lower() == 'enable':
+    return 0
+  if parg.lower() == 'disable':
+    return 1
+  raise argparse.ArgumentTypeError("Possible values are [Enable/Disable]") from None
+
+
+def openclose(parg):
+  if parg is None:
+    return None
+  if parg.lower() in "open":
+    return True
+  if parg.lower() in "close":
+    return False
+  raise argparse.ArgumentTypeError("Possible values are [Open/Close]") from None
+
 
 def set_loglevel():
   loglevel = os.getenv('LOGLEVEL', 'INFO')
@@ -299,6 +312,7 @@ def set_loglevel():
   except ValueError:
     logger.warning('Loglevel error: %s', loglevel)
 
+
 def format_codes():
   ctcss = textwrap.wrap(', '.join(CTCSS[1:]))
   dcs = textwrap.wrap(', '.join(DCS_CODES))
@@ -307,17 +321,16 @@ def format_codes():
     "You can specify a different code for transmit and receive by separating "
     "them by a comma.\n",
     "> Example: --ctcss 94.8,127.3 or --dcs 043N,047N\n\n",
-    "CTCSS codes (PL Tones):\n{}".format('\n'.join(ctcss)),
+    f"CTCSS codes (PL Tones)\n{chr(10).join(ctcss)}",
     "\n\n",
     "DCS Codes:\n"
     "DCS codes must be followed by N or I for Normal or Inverse:\n",
-    "> Example: 047I\n"
-    "{}".format('\n'.join(dcs))
+    f"> Example: 047I\n{chr(10).join(dcs)}"
   )
   return ''.join(codes)
 
-def main():
-  set_loglevel()
+
+def command_parser():
   parser = argparse.ArgumentParser(
     description="generate configuration for switch port",
     epilog=format_codes(),
@@ -330,7 +343,7 @@ def main():
                       help="Connection speed")
   subparsers = parser.add_subparsers()
 
-  p_radio = subparsers.add_parser("radio", help='Program the radio (frequency/tome/squelch)')
+  p_radio = subparsers.add_parser("radio", help='Program the radio (frequency/tone/squelch)')
   p_radio.set_defaults(func="radio")
   p_radio.add_argument('--bw', type=int, choices=(0, 1), default=1,
                        help="Bandwidth 0=NARROW (12.5KHz), 1=WIDE (25KHx) [default: WIDE]")
@@ -346,32 +359,43 @@ def main():
   code_group.add_argument("--dcs", default=None, type=type_dcs,
                           help=("DCS code must be the number followed by [N normal] or "
                                 "[I inverse]  [default: %(default)s]"))
-  p_radio.add_argument("--close-tail", default=None, type=noneyesno,
-                       help="Close CTCSS Tail Tone (yes/no)")
+  p_radio.add_argument("--tail", default=None, type=openclose,
+                       help="Close CTCSS Tail Tone (Open/Close)")
 
   p_volume = subparsers.add_parser("volume", help="Set the volume level")
   p_volume.set_defaults(func="volume")
   p_volume.add_argument("--level", type=type_level, default=4,
-                      help="Volume value (1 to 8) [default: %(default)s]")
+                        help="Volume value (1 to 8) [default: %(default)s]")
 
-  p_filter = subparsers.add_parser("filters", help="Set/Unset filters")
+  p_filter = subparsers.add_parser("filters", aliases=['filter'], help="Enable/Disable filters")
   p_filter.set_defaults(func="filters")
-  p_filter.add_argument("--emphasis", type=yesno, required=True,
-                        help="Disable [Pr/De]-emphasis (yes/no)")
-  p_filter.add_argument("--highpass", type=yesno, required=True,
-                        help="Disable high pass filter (yes/no)")
-  p_filter.add_argument("--lowpass", type=yesno, required=True,
-                        help="Disable low pass filters (yes/no)")
+  p_filter.add_argument("--emphasis", type=enabledisable,
+                        help="[Pr/De]-emphasis (Enable/Disable) [default: disable]")
+  p_filter.add_argument("--highpass", type=enabledisable,
+                        help="High pass filter (Enable/Disable) [default: disable]")
+  p_filter.add_argument("--lowpass", type=enabledisable,
+                        help="Low pass filters (Enable/Disable) [default: disable]")
 
   p_version = subparsers.add_parser("version", help="Show the firmware version of the SA818")
   p_version.set_defaults(func="version")
 
-  opts = parser.parse_args()
+  try:
+    opts = parser.parse_args()
+  except argparse.ArgumentTypeError as err:
+    parser.error(str(err))
+
   if not hasattr(opts, 'func'):
     print('sa818: error: the following arguments are required: {radio,volume,filters,version}\n'
           'use --help for more informatiion',
           file=sys.stderr)
-    sys.exit(os.EX_USAGE)
+    raise SystemExit('Argument Error') from None
+
+  return opts
+
+
+def main():
+  set_loglevel()
+  opts = command_parser()
 
   if opts.debug:
     logger.setLevel(logging.DEBUG)
@@ -381,17 +405,23 @@ def main():
   try:
     radio = SA818(opts.port, opts.speed)
   except (IOError, SystemError) as err:
-    logger.error(err)
-    sys.exit(os.EX_IOERR)
+    raise SystemExit(err) from None
 
   if opts.func == 'version':
     radio.version()
   elif opts.func == 'radio':
     radio.set_radio(opts)
   elif opts.func == 'filters':
+    for key in ('emphasis', 'highpass', 'lowpass'):
+      if getattr(opts, key) is not None:
+        break
+    else:
+      logger.error('filters need at least one argument')
+      raise SystemExit('Argument error') from None
     radio.set_filter(opts)
   elif opts.func == 'volume':
     radio.set_volume(opts)
+
 
 if __name__ == "__main__":
   main()
