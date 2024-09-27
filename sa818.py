@@ -116,11 +116,24 @@ class SA818:
     try:
       version = re.split(r'[:_]', reply)
     except ValueError:
-      logger.error('Unable to decode the firmware version')
+      logger.error('Unable to decode the rssi')
       return None
 
     logger.info('Firmware %s, version: %s', version[1], '_'.join(version[2:]))
     return version
+  
+  def rssi(self):
+    self.send("AT+RSSI?")
+    time.sleep(0.5)
+    reply = self.readline()
+    try:
+      rssi = re.split(r'[=]', reply)
+    except ValueError:
+      logger.error('Unable to decode the rssi')
+      return None
+
+    logger.info('RSSI %s',rssi[1])
+    return rssi
 
   def set_radio(self, opts):
     tone = opts.ctcss if opts.ctcss else opts.dcs
@@ -379,13 +392,16 @@ def command_parser():
   p_version = subparsers.add_parser("version", help="Show the firmware version of the SA818")
   p_version.set_defaults(func="version")
 
+  p_rssi = subparsers.add_parser("rssi", help="Show the rssi")
+  p_rssi.set_defaults(func="rssi")
+
   try:
     opts = parser.parse_args()
   except argparse.ArgumentTypeError as err:
     parser.error(str(err))
 
   if not hasattr(opts, 'func'):
-    print('sa818: error: the following arguments are required: {radio,volume,filters,version}\n'
+    print('sa818: error: the following arguments are required: {radio,volume,filters,version,rssi}\n'
           'use --help for more informatiion',
           file=sys.stderr)
     raise SystemExit('Argument Error') from None
@@ -409,6 +425,8 @@ def main():
 
   if opts.func == 'version':
     radio.version()
+  elif opts.func == 'rssi':
+    radio.rssi()
   elif opts.func == 'radio':
     radio.set_radio(opts)
   elif opts.func == 'filters':
